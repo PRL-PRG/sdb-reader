@@ -15,67 +15,46 @@ import scala.util.{Failure, Success, Try}
 import scala.meta.io.Classpath
 import scala.meta.internal.symtab._
 
+
 object CallSiteExtractor {
   implicit def position2Range(that: Position): s.Range =
     s.Range(that.startLine, that.startColumn, that.endLine, that.endColumn)
 }
 
-sealed trait ImplicitSynthetic {
-  def symbol: String
-
-  def range: s.Range
-
-  def synthetic: s.Synthetic
-}
-
-object ImplicitSynthetic {
-  def unapply(arg: s.Synthetic): Option[ImplicitSynthetic] = arg match {
-    // conversions
-    case s@s.Synthetic(_, s.ApplyTree(s.IdTree(symbol), s.OriginalTree(Some(range)) :: _)) =>
-      Some(ImplicitConversion(symbol, range, s))
-    case s@s.Synthetic(_, s.ApplyTree(s.TypeApplyTree(s.IdTree(symbol), targs), s.OriginalTree(Some(range)) :: _)) =>
-      Some(ImplicitConversion(symbol, range, s))
-
-    // implicit parameters
-    case s@s.Synthetic(_, s.ApplyTree(s.OriginalTree(Some(range)), s.TypeApplyTree(s.IdTree(symbol), targs) :: _)) =>
-      Some(ImplicitParameter(symbol, range, s))
-    case s@s.Synthetic(_, s.ApplyTree(s.OriginalTree(Some(range)), s.IdTree(symbol) :: _)) =>
-      Some(ImplicitParameter(symbol, range, s))
-    case _ => None
-  }
-}
-
-case class ImplicitConversion(symbol: String, range: s.Range, synthetic: s.Synthetic) extends ImplicitSynthetic {
-}
-
-case class ImplicitParameter(symbol: String, range: s.Range, synthetic: s.Synthetic) extends ImplicitSynthetic {
-}
 
 sealed trait CallSite {
-
-  import CallSiteExtractor.position2Range
-
   def fun: s.SymbolInformation
 
-  def tree: Option[Tree]
+  def implicitArgs: Seq[s.SymbolInformation]
 
-  val syntactic: Boolean = tree.isDefined
-  val range: Option[s.Range] = tree.map(_.pos)
-  val code: String = tree.map(_.toString()).getOrElse("<synthetic call>")
+  // TODO: arguments
+  // TODO: type arguments
+  // TODO: location
 
-  override def toString: String = s"Call(${fun.name}, ${tree.map(_.productPrefix)}($code)"
+  // FIXME: copy syntax does not work
+  def update(
+              fun: s.SymbolInformation = this.fun,
+              implicitArgs: Seq[s.SymbolInformation] = this.implicitArgs
+            ): CallSite =
+    this match {
+      case x: NormalCall => x.copy(fun = fun, implicitArgs = implicitArgs)
+      case x: SyntheticCall => x.copy(fun = fun, implicitArgs = implicitArgs)
+      case x: ConversionCall => x.copy(fun = fun, implicitArgs = implicitArgs)
+    }
 }
 
-case class NormalCall(fun: s.SymbolInformation, tree: Option[Tree]) extends CallSite {
-  override def toString: String = "Normal" + super.toString
+case class NormalCall(fun: s.SymbolInformation, tree: Tree, implicitArgs: Seq[s.SymbolInformation] = Seq()) extends CallSite {
+  val code: String = tree.toString()
+
+  override def toString: String = s"NormalCall(${fun.name}, ${tree.productPrefix}($code)"
 }
 
-case class ConversionCall(fun: s.SymbolInformation, tree: Option[Tree], conversion: ImplicitConversion) extends CallSite {
-  override def toString: String = "Conversion" + super.toString
+case class SyntheticCall(fun: s.SymbolInformation, range: Option[s.Range], implicitArgs: Seq[s.SymbolInformation] = Seq()) extends CallSite {
+  override def toString: String = s"SyntheticCall(${fun.name}, ${range.map(_.toString).getOrElse("<no range>")})"
 }
 
-case class ImplicitParameterCall(fun: s.SymbolInformation, tree: Option[Tree], implicitParameter: ImplicitParameter) extends CallSite {
-  override def toString: String = "ImplicitParameter" + super.toString
+case class ConversionCall(fun: s.SymbolInformation, implicitArgs: Seq[s.SymbolInformation] = Seq()) extends CallSite {
+  override def toString: String = s"ConversionCall(${fun.name})"
 }
 
 class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
@@ -88,48 +67,44 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
 
   val tree: Tree = db.text.parse[Source].get
   val synthetics: Seq[Synthetic] = db.synthetics
-  val implicits: Map[s.Range, ImplicitSynthetic] = synthetics.collect {
-    case ImplicitSynthetic(s) => s.range -> s
-  }.toMap
   val symbols: Map[s.Range, ResolvedSymbol] = db.occurrences.collect {
     case s@s.SymbolOccurrence(Some(range), _, _) => range -> ResolvedSymbol(s)
   }.toMap
 
   private val extraction: Seq[Try[CallSite]] = {
+    val explicitCallSitesExtraction = extractExplicitCallSites(tree)
+    updateWithSynthetics(explicitCallSitesExtraction)
+  }
+
+  val callSites: Seq[CallSite] = extraction collect {
+    case Success(x) => x
+  }
+
+  val failues: Seq[Throwable] = extraction collect {
+    case Failure(e) => e
+  }
+
+  def resolveSymbol(name: Term.Name): Try[s.SymbolInformation] = Try {
+    symbols.get(name.pos).map(_.info) match {
+      case Some(Some(x)) => x
+      case Some(None) =>
+        db.symbols.find(_.name == name.value) match {
+          case Some(x) => x
+          case None => throw new Exception(s"Term $name is not in symtab nor in local symbols")
+        }
+      case None => throw new Exception(s"Term $name is not in symbol occurencies")
+    }
+  }
+
+  def createCallSite(name: Term.Name, tree: Tree): Try[CallSite] = {
+    resolveSymbol(name).map(NormalCall(_, tree))
+  }
+
+  def extractExplicitCallSites(tree: Tree): Seq[Try[CallSite]] = {
     val seenSelects = mutable.HashSet[Term.Select]()
 
-    def matchImplicit(tree: Tree): Try[Option[ImplicitSynthetic]] = {
-//      implicits.get(tree.children.head.pos) match {
-//        case Some(x: ImplicitConversion) => Success(Some(x))
-//        case Some(x) => Failure(new Exception(s"Matched first children range, but got $x instead of ImplicitConversion for $tree"))
-//        case _ => implicits.get(tree.pos) match {
-//          case Some(x: ImplicitParameter) => Success(Some(x))
-//          case Some(x) => Failure(new Exception(s"Matched callsite range, but got $x instead of ImplicitParameter for $tree"))
-//          case _ => Success(None)
-//        }
-//      }
-      Success(None)
-    }
-
-    def resolveSymbol(name: Term.Name): Try[s.SymbolInformation] = Try {
-      symbols.get(name.pos).map(_.info) match {
-        case Some(Some(x)) => x
-        case Some(None) => throw new Exception(s"Term $name is not in symtab")
-        case None => throw new Exception(s"Term $name is not in symbol occurencies")
-      }
-    }
-
-    def createCallSite(name: Term.Name, tree: Tree): Try[CallSite] = {
-      resolveSymbol(name).flatMap { fun =>
-        matchImplicit(tree) collect {
-          case Some(x: ImplicitConversion) => ConversionCall(fun, Some(tree), x)
-          case Some(x: ImplicitParameter) => ImplicitParameterCall(fun, Some(tree), x)
-          case None => NormalCall(fun, Some(tree))
-        }
-      }
-    }
-
-    val explicitCallSites = tree collect {
+    // TODO: use recursion instead of collect
+    tree collect {
       case t@Term.Apply(n: Term.Name, _) =>
         createCallSite(n, t)
       case t@Term.Apply(s@Term.Select(qual, n: Term.Name), _) => {
@@ -147,26 +122,11 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
       case t@Term.NewAnonymous(Template(_, Init(n: Term.Name, _, _) :: _, _, _)) =>
         createCallSite(n, t)
     }
-
-    val processedSynthetics: Seq[s.Synthetic] = explicitCallSites collect {
-      case Success(ConversionCall(_, _, x)) => x.synthetic
-      case Success(ImplicitParameterCall(_, _, x)) => x.synthetic
-    }
-    val missedSynthetics = synthetics.toSet -- processedSynthetics
-    val syntheticCallSites = missedSynthetics.flatMap(createSyntheticCallSites)
-
-    explicitCallSites ++ syntheticCallSites
   }
 
-  val callSites: Seq[CallSite] = extraction collect {
-    case Success(x) => x
-  }
+  def updateWithSynthetics(triedSites: Seq[Try[CallSite]]): Seq[Try[CallSite]] = {
+    val extraction = triedSites.to[mutable.ArrayBuffer]
 
-  val failues: Seq[Throwable] = extraction collect {
-    case Failure(e) => e
-  }
-
-  def createSyntheticCallSites(synthetic: s.Synthetic): Seq[Try[CallSite]] = {
     def symbolName(t: s.Tree): Try[String] = t match {
       case s.IdTree(symbol) => Success(symbol)
       case s.SelectTree(_, Some(fn)) => symbolName(fn)
@@ -174,28 +134,75 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
       case x => Failure(new Exception(s"Unable to resolve $x"))
     }
 
-    def resolveName(t: s.Tree): Try[s.SymbolInformation] = {
-      symbolName(t).flatMap { name =>
-        symtab.info(name) match {
-          case Some(x) => Success(x)
-          case None => Failure(new Exception(s"Unable to find $name in symtab"))
-        }
+    def resolveSymbol(name: String): Try[s.SymbolInformation] = {
+      symtab.info(name).orElse(db.symbols.find(_.symbol == name)) match {
+        case Some(x) => Success(x)
+        case None => Failure(new Exception(s"Unable to find $name in symtab or in local symbols"))
       }
     }
 
-    def process(t: s.Tree): Seq[Try[CallSite]] = {
+    def resolveName(t: s.Tree): Try[s.SymbolInformation] = {
+      symbolName(t) flatMap resolveSymbol
+    }
+
+    def findCallSite(range: s.Range, full: Boolean): Option[(Int, CallSite)] = {
+      extraction.indexWhere {
+        case Success(NormalCall(_, t, _)) if !full => position2Range(t.children.head.pos) == range
+        case Success(NormalCall(_, t, _)) if full => position2Range(t.pos) == range
+        case Success(SyntheticCall(_, Some(r), _)) => r == range
+        case _ => false
+      } match {
+        case -1 => None
+        case idx => Some((idx, extraction(idx).get))
+      }
+    }
+
+    def process(t: s.Tree): Unit = {
       t match {
         case s.ApplyTree(s.ApplyTree(fn, args), s.TypeApplyTree(s.IdTree(symbol), targs) :: _) =>
           val call = resolveName(fn).map { fun =>
-            ImplicitParameterCall(fun, None, ImplicitParameter(symbol, synthetic.range.get, synthetic))
+            // TODO: implicit parameters
+            extraction :+ SyntheticCall(fun, None)
           }
-          call +: (process(fn) ++ args.flatMap(process))
+
+          process(fn)
+          args.foreach(process)
+        case s.ApplyTree(s.OriginalTree(Some(range)), args) =>
+          // implicit arguments
+          val symbols = args collect { case s.IdTree(symbol) => symbol }
+          val resolving = symbols map resolveSymbol
+          resolving.find(_.isFailure) match {
+            case Some(x) =>
+              extraction :+ Failure(new Exception(s"Unable to resolve implicit argument $x"))
+            case None => findCallSite(range, true) match {
+              case Some((idx, cs)) =>
+                extraction.update(idx, Success(cs.update(implicitArgs = resolving map (_.get))))
+              case None =>
+                extraction :+ Failure(new Exception(s"Unable find callsite for $range to add implicit parameters"))
+            }
+          }
         case s.ApplyTree(fn, args) =>
           val call = resolveName(fn).map { fun =>
-            NormalCall(fun, None)
+            // TODO: implicit parameters
+            extraction :+ SyntheticCall(fun, None)
           }
-          call +: args.flatMap(process)
-        case s.TypeApplyTree(fn, _) => process(fn)
+
+          args.foreach(process)
+        case s.SelectTree(s.OriginalTree(Some(range)), Some(fn)) =>
+          // inferred method call (e.g. `.apply` or `.unapplySeq`)
+          resolveName(fn).map { fun =>
+            findCallSite(range, false) match {
+              case Some((idx, cs)) =>
+                extraction.update(idx, Success(cs.update(fun = fun)))
+              case None =>
+                extraction :+ SyntheticCall(fun, Some(range))
+            }
+          }
+          // TODO: add error if resolveName fails
+          process(fn)
+        case s.TypeApplyTree(fn, targs) =>
+          // TODO: type parameters
+          process(fn)
         case s.SelectTree(fn, _) => process(fn)
         case s.FunctionTree(_, term) => process(term)
         case s.MacroExpansionTree(expandee, _) => process(expandee) // TODO: check
@@ -206,7 +213,17 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
       }
     }
 
-    process(synthetic.tree)
-  }
+    synthetics.foreach {
+      // implicit conversion
+      case s@s.Synthetic(_, s.ApplyTree(fun@s.IdTree(_), s.OriginalTree(Some(range)) :: _)) =>
+        extraction :+ resolveName(fun).map(ConversionCall(_))
+      case s@s.Synthetic(_, s.ApplyTree(fun@s.TypeApplyTree(s.IdTree(_), targs), s.OriginalTree(Some(range)) :: _)) =>
+        extraction :+ resolveName(fun).map(ConversionCall(_))
 
+      // other
+      case s => process(s.tree)
+    }
+
+    extraction
+  }
 }

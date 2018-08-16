@@ -16,6 +16,7 @@ libraryDependencies ++= Seq(
 
   "com.github.pathikrit" %% "better-files" % "3.4.0",
   "com.github.scopt" % "scopt_2.11" % "3.7.0",
+  "com.chuusai" %% "shapeless" % "2.3.3",
 
   "org.scalatest" %% "scalatest" % "3.2.0-SNAP10" % Test,
   "org.scalacheck" %% "scalacheck" % "1.13.5" % Test

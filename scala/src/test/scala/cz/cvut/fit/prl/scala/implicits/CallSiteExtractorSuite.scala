@@ -1,6 +1,7 @@
 package cz.cvut.fit.prl.scala.implicits
 
 import org.scalatest.Matchers
+import org.scalatest.matchers.{MatchResult, Matcher}
 
 import scala.collection.mutable
 import scala.collection.breakOut
@@ -89,23 +90,98 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
     synthetics(code)((db, tree) => fn(new CallSiteExtractor(db, symtab)))
   }
 
+//  extraction(
+//    """
+//      |object X {
+//      |  Seq(1)
+//      |}
+//    """.stripMargin) { extractor =>
+//
+//    val css = extractor.callSites
+//    css should have size 1
+//
+//    css.find(_.fun.name == "apply") check { x =>
+//      x shouldBe a[NormalCall]
+//    }
+//  }
+
+//  extraction(
+//    """
+//      |object X {
+//      |  object A {
+//      |    def apply(x: Int) = x
+//      |  }
+//      |  A(1)
+//      |}
+//    """.stripMargin) { extractor =>
+//
+//    val css = extractor.callSites
+//    css should have size 1
+//
+//    css.find(_.fun.name == "apply") check { x =>
+//      x shouldBe a[NormalCall]
+//    }
+//  }
+
   extraction(
     """
       |object X {
-      |  1 -> 2
+      |  object A {
+      |    def apply(x: String)(implicit y: Int) = x
+      |  }
+      |  implicit val iy = 1
+      |  A("A")
       |}
     """.stripMargin) { extractor =>
-    extractor.failues shouldBe empty
 
-    println(extractor.db.synthetics.map(new LegacySyntheticPrinter().toLegacy(_)).mkString("\n\n"))
     val css = extractor.callSites
     css should have size 1
 
-    val cs = css.head
-    cs shouldBe a[ConversionCall]
-    cs.fun shouldBe "->"
+    css.find(_.fun.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+      x.implicitArgs should have size 1
+    }
   }
 
+//
+//  extraction(
+//    """
+//      |object X {
+//      |  val List(a,b) = Seq(1,2)
+//      |}
+//    """.stripMargin) { extractor =>
+//
+//    val css = extractor.callSites
+//    css should have size 3
+//
+//    // TOD0: there should be two apply
+//    css.find(_.fun.name == "apply") check { x =>
+//      x shouldBe a[NormalCall]
+//    }
+//    css.find(_.fun.name == "unapplySeq") check { x =>
+//      x shouldBe a[SyntheticCall]
+//    }
+//  }
+//
+//  extraction(
+//    """
+//      |object X {
+//      |  1 -> 2
+//      |}
+//    """.stripMargin) { extractor =>
+//    extractor.failues shouldBe empty
+//
+//    val css = extractor.callSites
+//    css should have size 2
+//
+//    css.find(_.fun.name == "ArrowAssoc") check { x =>
+//      x shouldBe a[ConversionCall]
+//    }
+//    css.find(_.fun.name == "->") check { x =>
+//      x shouldBe a[NormalCall]
+//    }
+//  }
+//
 //  extraction(
 //    """
 //      |object X {
@@ -115,13 +191,16 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 //    extractor.failues shouldBe empty
 //
 //    val css = extractor.callSites
-//    css should have size (1)
+//    css should have size 2
 //
-//    val cs = css.head
-//    cs shouldBe a[ConversionCall]
-//    cs.fun shouldBe "stripMargin"
+//    css.find(_.fun.name == "stripMargin") check { x =>
+//      x shouldBe a[NormalCall]
+//    }
+//    css.find(_.fun.name == "augmentString") check { x =>
+//      x shouldBe a[ConversionCall]
+//    }
 //  }
-//
+
 //  extraction(
 //    """
 //      |object X {
@@ -133,13 +212,10 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 //    val css = extractor.callSites
 //    println(css)
 //
-//    css should have size (3)
+//    css should have size 3
 //
-//    val cs = css.head
-//    cs shouldBe a[ImplicitParameterCall]
-//    cs.fun shouldBe "map"
 //  }
-//
+
 //  extraction(
 //    """
 //      |object X {
@@ -155,12 +231,12 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 //
 //    css should have size 2
 //
-//    css.find(_.fun.endsWith("map().")) check { x =>
-//      x shouldBe a[ImplicitParameterCall]
-//    }
-//    css.find(_.fun == "Seq") check { x =>
-//      x shouldBe a[NormalCall]
-//    }
+////    css.find(_.fun.endsWith("map().")) check { x =>
+////      x shouldBe a[ImplicitParameterCall]
+////    }
+////    css.find(_.fun == "Seq") check { x =>
+////      x shouldBe a[NormalCall]
+////    }
 //  }
 //
 //  extraction(

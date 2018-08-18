@@ -1,17 +1,9 @@
 package cz.cvut.fit.prl.scala.implicits
 
 import org.scalatest.Matchers
-import org.scalatest.matchers.{MatchResult, Matcher}
-
-import scala.collection.mutable
-import scala.collection.breakOut
-import scala.language.implicitConversions
-import scala.meta.internal.symtab.GlobalSymbolTable
 import scala.meta.semanticdb.SemanticdbSuite
 import scala.meta.internal.{semanticdb => s}
-import scala.meta.io.Classpath
-import scala.meta.{inputs, _}
-import scala.meta.internal.semanticdb.{IdTree, Synthetic}
+import scala.reflect.ClassTag
 
 class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 
@@ -23,23 +15,19 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
   }
 
   implicit class XtensionAny[T](x: T) {
-    def check(tester: T => Unit): Unit = tester(x)
+    def check[U <: T : ClassTag](tester: U => Unit): Unit = {
+      val clazz = implicitly[ClassTag[U]].runtimeClass
+      if (!clazz.isAssignableFrom(x.getClass)) {
+        fail(s"$x is not instanceof $clazz")
+      }
+      tester(x.asInstanceOf[U])
+    }
   }
 
-  // implicit conversion - method call
-  //  database(
-  //    """
-  //      | object X {
-  //      |   implicit class A(x: Int) {
-  //      |     def f(): String = "A"
-  //      |   }
-  //      |
-  //      |   1.f()
-  //      | }
-  //    """.stripMargin) { db =>
-  //    print(db.synthetics)
-  //  }
-
+  def checkNoFailures(extractor: CallSiteExtractor): Unit = {
+    extractor.failures.foreach(_.printStackTrace())
+    extractor.failures shouldBe empty
+  }
 
   // TC
   //  database(
@@ -91,7 +79,11 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
   //    println()
 
   def extraction(code: String)(fn: CallSiteExtractor => Unit): Unit = {
-    synthetics(code)((db, tree) => fn(new CallSiteExtractor(db, symtab)))
+    synthetics(code)((db, tree) => {
+      val extractor = new CallSiteExtractor(db, symtab)
+      checkNoFailures(extractor)
+      fn(extractor)
+    })
   }
 
   extraction(
@@ -101,12 +93,11 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       |  f(1)
       |}
     """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
 
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "f") check { x =>
+    css.find(_.declaration.name == "f") check { x =>
       x shouldBe a[NormalCall]
       x.typeArgs should have size 1
     }
@@ -124,29 +115,29 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "apply") check { x =>
+    css.find(_.declaration.name == "apply") check { x =>
       x shouldBe a[NormalCall]
       x.typeArgs should have size 1
     }
   }
 
-//  extraction(
-//    """
-//      |object X {
-//      |  object A {
-//      |    def apply(x: Int) = x
-//      |  }
-//      |  A(1)
-//      |}
-//    """.stripMargin) { extractor =>
-//
-//    val css = extractor.callSites
-//    css should have size 1
-//
-//    css.find(_.fun.name == "apply") check { x =>
-//      x shouldBe a[NormalCall]
-//    }
-//  }
+  extraction(
+    """
+      |object X {
+      |  object A {
+      |    def apply(x: Int) = x
+      |  }
+      |  A(1)
+      |}
+    """.stripMargin) { extractor =>
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.declaration.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+    }
+  }
 
   extraction(
     """
@@ -158,15 +149,13 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       |  A("A")
       |}
     """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
 
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "apply") check { x =>
+    css.find(_.declaration.name == "apply") check { x =>
       x shouldBe a[NormalCall]
       x.implicitArgs.check { list =>
-        list.isImplicit shouldBe true
         list.syntactic shouldBe false
         list.args should have size 1
       }
@@ -188,10 +177,9 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "apply") check { x =>
+    css.find(_.declaration.name == "apply") check { x =>
       x shouldBe a[NormalCall]
       x.implicitArgs.check { list =>
-        list.isImplicit shouldBe true
         list.syntactic shouldBe false
         list.args should have size 1
       }
@@ -209,15 +197,13 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       |  A.apply[Int](1)
       |}
     """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
 
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "apply") check { x =>
+    css.find(_.declaration.name == "apply") check { x =>
       x shouldBe a[NormalCall]
       x.implicitArgs.check { list =>
-        list.isImplicit shouldBe true
         list.syntactic shouldBe false
         list.args should have size 1
       }
@@ -235,15 +221,13 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       |  A.apply[Int](1)(2)
       |}
     """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
 
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "apply") check { x =>
+    css.find(_.declaration.name == "apply") check { x =>
       x shouldBe a[NormalCall]
       x.implicitArgs.check { list =>
-        list.isImplicit shouldBe true
         list.syntactic shouldBe true
         list.args should have size 1
       }
@@ -259,15 +243,13 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       |  new A(1)("A")
       |}
     """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
 
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "<init>") check { x =>
+    css.find(_.declaration.name == "<init>") check { x =>
       x shouldBe a[NormalCall]
       x.implicitArgs.check { list =>
-        list.isImplicit shouldBe true
         list.syntactic shouldBe false
         list.args should have size 1
       }
@@ -283,15 +265,13 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       |  new A(1)("A")
       |}
     """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
 
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "<init>") check { x =>
+    css.find(_.declaration.name == "<init>") check { x =>
       x shouldBe a[NormalCall]
       x.implicitArgs.check { list =>
-        list.isImplicit shouldBe true
         list.syntactic shouldBe false
         list.args should have size 1
       }
@@ -316,10 +296,9 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
     val css = extractor.callSites
     css should have size 1
 
-    css.find(_.fun.name == "<init>") check { x =>
+    css.find(_.declaration.name == "<init>") check { x =>
       x shouldBe a[NormalCall]
       x.implicitArgs.check { list =>
-        list.isImplicit shouldBe true
         list.syntactic shouldBe true
         list.args should have size 1
       }
@@ -410,56 +389,73 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 
   extraction(
     """
-      |object X {
+      |object SimpleFor {
       |  for {
       |    i <- Seq(1,2)
-      |  } yield i + 1
+      |  } yield i.toString
       |}
     """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
 
     val css = extractor.callSites
-    println(css)
 
     css should have size 3
 
-//    Seq(1,2) map (i=> i + 1)
-
-//    css.find(_.fun.endsWith("map().")) check { x =>
-//      x shouldBe a[ImplicitParameterCall]
-//    }
-//    css.find(_.fun == "Seq") check { x =>
-//      x shouldBe a[NormalCall]
-//    }
+    css.find(_.declaration.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+    }
+    css.find(_.declaration.name == "toString") check { x =>
+      x shouldBe a[NormalCall]
+    }
+    css.find(_.declaration.name == "map") check { x =>
+      x shouldBe a[SyntheticCall]
+      x.argss should have size 2
+      x.implicitArgs.check { x =>
+        x.syntactic shouldBe false
+        x.args should have size 1
+        x.args.head.check[TypeRef] { x =>
+          x.symbol.name shouldBe "canBuildFrom"
+        }
+      }
+    }
   }
 
-//  extraction(
-//    """
-//      |object X {
-//      |  for {
-//      |    i <- 1 to 10
-//      |    j <- 0 until 10
-//      |    if i % 2 == 0
-//      |  } yield (i, j)
-//      |}
-//    """.stripMargin) { extractor =>
-//    extractor.failues shouldBe empty
-//
-//    val css = extractor.callSites
-//    println(css)
-//
-//    css should have size 7
-//
-//    css.find(_.fun.endsWith("map().")).check { x =>
-//      x shouldBe a[ImplicitParameterCall]
-//    }
-//    css.find(_.fun.endsWith("flatMap().")).check { x =>
-//      x shouldBe a[ImplicitParameterCall]
-//    }
-//    css.find(_.fun.endsWith("withFilter().")).check { x =>
-//      x shouldBe a[NormalCall]
-//    }
-//  }
+//    Seq(1,2) map (i=> i + 1)
+
+  extraction(
+    """
+      |object NestForWithFilter {
+      |  for {
+      |    i <- 1 to 10 if i % 2 == 0
+      |    j <- Seq('A', 'B')
+      |  } yield (i, j)
+      |}
+    """.stripMargin) { extractor =>
+
+    val css = extractor.callSites
+
+    css should have size 8
+  }
+
+  extraction(
+    """
+      |object ForLoopWithFuture {
+      |  import scala.concurrent.Future
+      |  import scala.concurrent.ExecutionContext.Implicits.global
+      |
+      |  for {
+      |    a <- Future.successful(1)
+      |    b <- Future.successful(2)
+      |  } a + b
+      |}
+    """.stripMargin) { extractor =>
+    val css = extractor.callSites
+
+    css should have size 5
+  }
+
+  //     (1 to 10).withFilter(i => i % 2 == 0).flatMap(i =>
+  //      Seq('A','B').map(j => (i,j))
+  //    )
 //
 //  extraction(
 //    """

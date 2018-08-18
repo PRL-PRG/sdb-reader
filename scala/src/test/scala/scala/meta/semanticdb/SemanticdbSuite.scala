@@ -3,6 +3,8 @@ package scala.meta.semanticdb
 import org.scalatest._
 import java.io.{File, PrintWriter}
 
+import cz.cvut.fit.prl.scala.implicits.BuildInfo
+
 import scala.reflect.io._
 import scala.tools.cmd.CommandLineParser
 import scala.tools.nsc.{CompilerCommand, Global, Settings}
@@ -25,13 +27,27 @@ abstract class SemanticdbSuite extends FunSuite with DiffAssertions { self =>
 
   lazy val g: Global = {
     def fail(msg: String) = sys.error(s"SemanticdbSuite initialization failed: $msg")
-    val classpath = sys.props("sbt.paths.tests.test.classes")
-    if (classpath == null) fail("classpath not set. broken build?")
-    val pluginjar = sys.props("sbt.paths.semanticdb-scalac-plugin.compile.jar")
-    if (pluginjar == null) fail("pluginjar not set. broken build?")
-    val paradiseJar =
-      sys.props("sbt.paths.tests.test.options").split(" ").find(_.contains("paradise")).orNull
-    if (paradiseJar == null) fail("Missing scalamacros/paradise from scalacOptions")
+
+    if (BuildInfo.test_externalDependencyClasspath.isEmpty) {
+      fail("empty classpath. broken build?")
+    }
+    BuildInfo.test_externalDependencyClasspath.filter(!_.exists()) match {
+      case Seq() => // no error
+      case Seq(x@_*) => fail("The following classpath entries do not exist: "+x)
+    }
+    val classpath =
+      BuildInfo
+        .test_externalDependencyClasspath
+        .map(_.getAbsolutePath)
+        .mkString(java.io.File.pathSeparator)
+
+    val pluginjar = BuildInfo.semanticdbScalacPluginJar
+    if (!new File(pluginjar).exists()) fail(s"`$pluginjar`: does not exists. broken build?")
+
+    val paradiseJar = BuildInfo.test_scalacOptions.find(_.contains("paradise")).orNull
+    if (paradiseJar == null) fail("scalamacros/paradise does not exists in scalacOptions. broken build?")
+    if (!new File(paradiseJar.split(":")(1)).exists()) fail(s"`$paradiseJar`: does not exists. broken build?")
+
     val options = "-Yrangepos -Ywarn-unused-import -Ywarn-unused -cp " + classpath +
       " -Xplugin:" + pluginjar + " -Xplugin-require:semanticdb " +
       paradiseJar + " -Xplugin-require:macro-paradise-plugin"
@@ -40,6 +56,9 @@ abstract class SemanticdbSuite extends FunSuite with DiffAssertions { self =>
     val reporter = new StoreReporter()
     val command = new CompilerCommand(args, emptySettings)
     val settings = command.settings
+    // in the case it is run from intellij
+    // TODO: just in case of intellij - check the java.class.path entry!
+    settings.usejavacp.value = true
     val g = new Global(settings, reporter)
     val run = new g.Run
     g.phase = run.parserPhase

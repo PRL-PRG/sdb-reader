@@ -15,11 +15,15 @@ import scala.meta.internal.semanticdb.{IdTree, Synthetic}
 
 class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 
-  implicit class XtensionCheck[T](x: Option[T]) {
+  implicit class XtensionOption[T](x: Option[T]) {
     def check(tester: T => Unit): Unit = x match {
       case Some(y) => tester(y)
       case None => throw new Exception("No such element")
     }
+  }
+
+  implicit class XtensionAny[T](x: T) {
+    def check(tester: T => Unit): Unit = tester(x)
   }
 
   // implicit conversion - method call
@@ -90,20 +94,41 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
     synthetics(code)((db, tree) => fn(new CallSiteExtractor(db, symtab)))
   }
 
-//  extraction(
-//    """
-//      |object X {
-//      |  Seq(1)
-//      |}
-//    """.stripMargin) { extractor =>
-//
-//    val css = extractor.callSites
-//    css should have size 1
-//
-//    css.find(_.fun.name == "apply") check { x =>
-//      x shouldBe a[NormalCall]
-//    }
-//  }
+  extraction(
+    """
+      |object X {
+      |  def f[T](x: T) = x
+      |  f(1)
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "f") check { x =>
+      x shouldBe a[NormalCall]
+      x.typeArgs should have size 1
+    }
+  }
+
+
+  extraction(
+    """
+      |object X {
+      |  Seq(1)
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+      x.typeArgs should have size 1
+    }
+  }
 
 //  extraction(
 //    """
@@ -133,15 +158,182 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       |  A("A")
       |}
     """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
 
     val css = extractor.callSites
     css should have size 1
 
     css.find(_.fun.name == "apply") check { x =>
       x shouldBe a[NormalCall]
-      x.implicitArgs should have size 1
+      x.implicitArgs.check { list =>
+        list.isImplicit shouldBe true
+        list.syntactic shouldBe false
+        list.args should have size 1
+      }
     }
   }
+
+  extraction(
+    """
+      |object X {
+      |  object A {
+      |    def apply[T](x: T)(implicit y: T) = x
+      |  }
+      |  implicit val iy = 1
+      |  A(1)
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+      x.implicitArgs.check { list =>
+        list.isImplicit shouldBe true
+        list.syntactic shouldBe false
+        list.args should have size 1
+      }
+      x.typeArgs should have size 1
+    }
+  }
+
+  extraction(
+    """
+      |object X1 {
+      |  object A {
+      |    def apply[T](x: T)(implicit y: T) = x
+      |  }
+      |  implicit val iy = 1
+      |  A.apply[Int](1)
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+      x.implicitArgs.check { list =>
+        list.isImplicit shouldBe true
+        list.syntactic shouldBe false
+        list.args should have size 1
+      }
+      x.typeArgs should have size 1
+    }
+  }
+
+  extraction(
+    """
+      |object X2 {
+      |  object A {
+      |    def apply[T](x: T)(implicit y: T) = x
+      |  }
+      |  implicit val iy = 1
+      |  A.apply[Int](1)(2)
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+      x.implicitArgs.check { list =>
+        list.isImplicit shouldBe true
+        list.syntactic shouldBe true
+        list.args should have size 1
+      }
+      x.typeArgs should have size 1
+    }
+  }
+
+  extraction(
+    """
+      |object X2 {
+      |  class A(x: Int)(y: String)(implicit z: Boolean)
+      |  implicit val iz = true
+      |  new A(1)("A")
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "<init>") check { x =>
+      x shouldBe a[NormalCall]
+      x.implicitArgs.check { list =>
+        list.isImplicit shouldBe true
+        list.syntactic shouldBe false
+        list.args should have size 1
+      }
+      x.typeArgs should have size 0
+    }
+  }
+
+  extraction(
+    """
+      |object ClassConstructorImplicitTypeArgs {
+      |  class A[T](x: T)(y: String)(implicit z: Boolean)
+      |  implicit val iz = true
+      |  new A(1)("A")
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "<init>") check { x =>
+      x shouldBe a[NormalCall]
+      x.implicitArgs.check { list =>
+        list.isImplicit shouldBe true
+        list.syntactic shouldBe false
+        list.args should have size 1
+      }
+      // there are no type arguments, only parameters
+      x.typeArgs should have size 0
+    }
+  }
+
+  //  class X
+  //  class X2 extends X
+
+  extraction(
+    """
+      |object ClassConstructorExplicitImplicitTypeArgs {
+      |  class A[T](x: T)(y: String)(implicit z: Boolean)
+      |  implicit val iz = true
+      |  new A[Any](1)("A")(false)
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.fun.name == "<init>") check { x =>
+      x shouldBe a[NormalCall]
+      x.implicitArgs.check { list =>
+        list.isImplicit shouldBe true
+        list.syntactic shouldBe true
+        list.args should have size 1
+      }
+      x.typeArgs should have size 1
+    }
+  }
+
+  // TODO: new A[]
+  // TODO: new A[](impl)
+  // TODO: new A[] {}
+  // TODO: new A[](impl) {}
+  // TODO: a.+[A](impl)
+  // TODO: -[A]x(impl)
+  // TODO: multiple parameter lists
 
 //
 //  extraction(
@@ -216,29 +408,31 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 //
 //  }
 
-//  extraction(
-//    """
-//      |object X {
-//      |  for {
-//      |    i <- Seq(1,2)
-//      |  } yield i
-//      |}
-//    """.stripMargin) { extractor =>
-//    extractor.failues shouldBe empty
-//
-//    val css = extractor.callSites
-//    println(css)
-//
-//    css should have size 2
-//
-////    css.find(_.fun.endsWith("map().")) check { x =>
-////      x shouldBe a[ImplicitParameterCall]
-////    }
-////    css.find(_.fun == "Seq") check { x =>
-////      x shouldBe a[NormalCall]
-////    }
-//  }
-//
+  extraction(
+    """
+      |object X {
+      |  for {
+      |    i <- Seq(1,2)
+      |  } yield i + 1
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    println(css)
+
+    css should have size 3
+
+//    Seq(1,2) map (i=> i + 1)
+
+//    css.find(_.fun.endsWith("map().")) check { x =>
+//      x shouldBe a[ImplicitParameterCall]
+//    }
+//    css.find(_.fun == "Seq") check { x =>
+//      x shouldBe a[NormalCall]
+//    }
+  }
+
 //  extraction(
 //    """
 //      |object X {

@@ -8,6 +8,7 @@ class SymtabSuite extends SemanticdbSuite with Matchers {
 
   test("symbol resolution") {
     symtab.info("scala/Predef.ArrowAssoc#`->`().") shouldBe defined
+    symtab.info("scala/collection/generic/GenericCompanion#apply().") shouldBe defined
   }
 
 }

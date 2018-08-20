@@ -88,6 +88,62 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 
   extraction(
     """
+      | object NestedCall {
+      |   math.max(1+2, 3+4)
+      | }
+    """.stripMargin) { extractor =>
+    val css = extractor.callSites
+    css should have size 3
+  }
+
+  extraction(
+    """
+      |object InferredApplyCall {
+      |  Seq(1)
+      |}
+    """.stripMargin) { extractor =>
+    extractor.failures shouldBe empty
+
+    val css = extractor.callSites
+    css should have size 1
+
+    css.find(_.declaration.name == "apply") check { x =>
+      x shouldBe a[NormalCall]
+      x.typeArgs should have size 1
+    }
+  }
+
+//  extraction(
+//    """
+//      |
+//    """.stripMargin) { extractor =>
+//
+////    class A
+////    class B
+////    implicit def a2b(x: A): B = new B
+////    implicit val a = new A
+////    def f(x: Int)(implicit b: B) = 1
+////
+////    f(1)
+//  }
+
+  // TODO:
+//  extraction(
+//    """
+//      | object NonLocalImplicitParameter {
+//      |   Seq(1) ++ List(1)
+//      | }
+//    """.stripMargin) { extractor =>
+//
+//    val css = extractor.callSites
+//    css should have size 3
+//  }
+
+  // TODO:  "object X { val x: a.b = c.d }"
+// TODO:  type +[A,B] = Tupel2[A,B]; val x: A+B = 1
+
+  extraction(
+    """
       |object X {
       |  def f[T](x: T) = x
       |  f(1)
@@ -103,23 +159,6 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
     }
   }
 
-
-  extraction(
-    """
-      |object X {
-      |  Seq(1)
-      |}
-    """.stripMargin) { extractor =>
-    extractor.failures shouldBe empty
-
-    val css = extractor.callSites
-    css should have size 1
-
-    css.find(_.declaration.name == "apply") check { x =>
-      x shouldBe a[NormalCall]
-      x.typeArgs should have size 1
-    }
-  }
 
   extraction(
     """
@@ -306,6 +345,144 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
     }
   }
 
+  extraction(
+    """
+      | object ExpressionsArguments {
+      |   def f(x: Int) = x
+      |   f(1+1)
+      | }
+    """.stripMargin
+  ) { extractor =>
+    val css = extractor.callSites
+    css should have size 2
+
+  }
+
+  extraction(
+    """
+      | object BasicStringInterpolation {
+      |   val z = "A"
+      |   s"Test $z"
+      | }
+    """.stripMargin
+  ) { extractor =>
+    val css = extractor.callSites
+    css should have size 1
+
+  }
+
+  // FIXME: making z a string does not work - "java/lang/String#`+`()." cannot be resolved in symtab?!
+  extraction(
+    """
+      | object StringInterpolationWithExpression {
+      |   val z = 1 // "A"
+      |   s"Test ${z + 1}"
+      | }
+    """.stripMargin
+  ) { extractor =>
+    val css = extractor.callSites
+    css should have size 2
+  }
+
+  extraction(
+    """
+      | object StringInterpolationWithMap {
+      |   val xs = Seq(1)
+      |   s"Test ${xs.map(_ + 1)}"
+      | }
+    """.stripMargin
+  ) { extractor =>
+    val css = extractor.callSites
+    css should have size 5
+  }
+
+  extraction(
+    """
+      |package a.b.c
+      |
+      |object SelectInPackage {
+      |}
+    """.stripMargin
+  ) { extractor => extractor.callSites shouldBe empty }
+
+  extraction(
+    """
+      |import scala.concurrent.Future
+      |
+      |object SelectInImport {
+      |}
+    """.stripMargin
+  ) { extractor => extractor.callSites shouldBe empty }
+
+  extraction(
+    """
+      |object SelectInVar {
+      |  var x: scala.collection.Seq[Int] = null
+      |}
+    """.stripMargin) { extractor =>
+    extractor.callSites shouldBe empty
+  }
+
+  extraction(
+    """
+      |object SelectInVal {
+      |  val x: scala.collection.Seq[Int] = null
+      |}
+    """.stripMargin) { extractor =>
+    extractor.callSites shouldBe empty
+  }
+
+  extraction(
+    """
+      |object SelectInParam {
+      |  def f(x: scala.collection.Seq[Int]): scala.collection.Seq[Int] = x
+      |}
+    """.stripMargin) { extractor =>
+    extractor.callSites shouldBe empty
+  }
+
+  extraction(
+    """
+      |object SelectAsCall {
+      |  "A".hashCode.hashCode
+      |}
+    """.stripMargin) { extractor =>
+    val css = extractor.callSites
+    css should have size 2
+  }
+
+//  extraction(
+//    """
+//      |object StringInterpolationWithMap {
+//      |  sealed trait FileEdit extends Ordered[FileEdit] {
+//      |    def text: String
+//      |
+//      |  import scala.math.Ordered.orderingToOrdered
+//      |
+//      |  def compare(that: FileEdit): Int =
+//           (this.text, this.text)
+//      |      .compare((that.text, that.text))
+//      |  }
+//      |}
+//    """.stripMargin
+//  ) { extractor =>
+//    val css = extractor.callSites
+//    css should have size 4
+//
+//    // TODO: check tuple
+//
+//    sealed trait FileEdit extends Ordered[FileEdit] {
+//      def file: Int//java.io.File
+//      def text: String
+//
+//      import scala.math.Ordered.orderingToOrdered
+//
+//      def compare(that: FileEdit): Int =
+//        (file, this.text)
+//          .compare((that.file, that.text))
+//    }
+//  }
+
   // TODO: new A[]
   // TODO: new A[](impl)
   // TODO: new A[] {}
@@ -398,7 +575,7 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 
     val css = extractor.callSites
 
-    css should have size 3
+    css should have size 4
 
     css.find(_.declaration.name == "apply") check { x =>
       x shouldBe a[NormalCall]
@@ -412,8 +589,8 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
       x.implicitArgs.check { x =>
         x.syntactic shouldBe false
         x.args should have size 1
-        x.args.head.check[TypeRef] { x =>
-          x.symbol.name shouldBe "canBuildFrom"
+        x.args.head.check[CallSiteRef] { x =>
+          x.callSite.declaration.name shouldBe "canBuildFrom"
         }
       }
     }
@@ -433,7 +610,7 @@ class CallSiteExtractorSuite extends SemanticdbSuite with Matchers {
 
     val css = extractor.callSites
 
-    css should have size 8
+    css should have size 10
   }
 
   extraction(

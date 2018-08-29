@@ -4,6 +4,7 @@ import org.scalatest._
 import java.io.{File, PrintWriter}
 
 import cz.cvut.fit.prl.scala.implicits.BuildInfo
+import cz.cvut.fit.prl.scala.implicits.utils.Libraries
 
 import scala.reflect.io._
 import scala.tools.cmd.CommandLineParser
@@ -75,14 +76,10 @@ abstract class SemanticdbSuite extends FunSuite with DiffAssertions { self =>
   def customizeConfig(config: SemanticdbConfig): SemanticdbConfig = config
 
   lazy val symtab: GlobalSymbolTable = {
-    val bootClasspath = Classpath(
-      sys.props
-        .collectFirst { case (k, v) if k.endsWith(".boot.class.path") => v }
-        .getOrElse("")).entries.filter(_.isFile)
     val scalacpClasspath =
-      Classpath(g.settings.classpath.value).entries
+      Classpath(g.settings.classpath.value)
 
-    GlobalSymbolTable(Classpath(bootClasspath ++ scalacpClasspath))
+    GlobalSymbolTable(Libraries.JvmBootClasspath ++ scalacpClasspath)
   }
 
   import databaseOps._

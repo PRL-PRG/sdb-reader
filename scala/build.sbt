@@ -1,19 +1,74 @@
-val scalametaVersion = "4.0.0-M8"
+import scalapb.compiler.Version.scalapbVersion
+
+val scalametaVersion = "4.0.0"
 
 ThisBuild / scalaVersion := "2.12.6"
-ThisBuild / organization := "cz.cvut.fit.prl.scala.sdbreader"
+ThisBuild / organization := "cz.cvut.fit.prl.scala.implicits"
+ThisBuild / version := "1.0-SNAPSHOT"
 
-lazy val hello = (project in file("."))
+// this is for the sbt-buildinfo plugin
+resolvers += Resolver.sbtPluginRepo("releases")
+
+// this is here so we can extend semnaticdb schema (which we do for merging the raw semanticdb)
+// the semanticdb jar does not include the proto file so we cannot use the standard mechanism
+// this has to be run manually, I do not know how to make it a dependency for the PB.generate
+lazy val downloadSemanticdbProto = taskKey[Unit]("Download semanticdb proto file")
+downloadSemanticdbProto := {
+  val outputFile = new java.io.File("model/target/protobuf_external/semanticdb.proto")
+  if (!outputFile.exists()) {
+    if (!outputFile.getParentFile.exists()) {
+      outputFile.getParentFile.mkdirs()
+    }
+    val src = scala.io.Source.fromURL("https://raw.githubusercontent.com/scalameta/scalameta/master/semanticdb/semanticdb/semanticdb.proto")
+    val out = new java.io.FileWriter(outputFile)
+    out.write(src.mkString)
+    out.close()
+    println("Downloaded " + outputFile)
+  } else {
+    println(s"$outputFile has been already downloaded")
+  }
+}
+
+lazy val root = (project in file("."))
+  .aggregate(model, transformation)
+
+// the reason, why we split the project is that there is some bug in either scalapb or buildinfo
+// and they do not work well together
+// when they are together, the build fails with `BuildInfo is already defined as case class BuildInfo`
+// there seem to be some race conditions (sometimes it would simply complain that the buildinfo does not exist)
+lazy val model = (project in file("model"))
+  .settings(
+    name := "model",
+    libraryDependencies ++= Seq(
+      "org.scalameta" %% "semanticdb" % scalametaVersion
+    ),
+    PB.targets in Compile := Seq(
+      scalapb.gen(
+        flatPackage = true // Don't append filename to package
+      ) -> sourceManaged.in(Compile).value
+    ),
+  )
+
+// this is just so we get some code completion in idea
+lazy val scripts = (project in file("scripts"))
+  .dependsOn(model, transformation)
+  .settings(
+    name := "scripts",
+  )
+
+lazy val transformation = (project in file("transformation"))
   .enablePlugins(BuildInfoPlugin)
   .settings(
-    name := "sdb-reader",
+    name := "transformation",
     libraryDependencies ++= Seq(
       "org.scalameta" %% "scalameta" % scalametaVersion,
       "org.scalameta" %% "testkit" % scalametaVersion,
-      "org.scalameta" %% "metap" % scalametaVersion,
       "org.scalameta" %% "metacp" % scalametaVersion,
+      "org.scalameta" %% "metap" % scalametaVersion,
       "org.scalameta" %% "symtab" % scalametaVersion,
       "org.scalameta" %% "semanticdb" % scalametaVersion,
+      "org.scalameta" % ("metac_" + scalaVersion.value) % scalametaVersion,
+      "org.scalameta" % ("interactive_" + scalaVersion.value) % scalametaVersion,
       "org.scalameta" % ("semanticdb-scalac_" + scalaVersion.value) % scalametaVersion,
       "org.scala-lang" % "scala-compiler" % scalaVersion.value,
 
@@ -25,7 +80,7 @@ lazy val hello = (project in file("."))
       "org.scalatest" %% "scalatest" % "3.2.0-SNAP10" % Test,
       "org.scalacheck" %% "scalacheck" % "1.13.5" % Test
     ),
-    buildInfoPackage := "cz.cvut.fit.prl.scala.implicits",
+    buildInfoPackage := "cz.cvut.fit.prl.scala.implicits.utils",
     buildInfoKeys := Seq[BuildInfoKey](
       name,
       version,
@@ -48,3 +103,4 @@ lazy val hello = (project in file("."))
     parallelExecution.in(Test) := false, // hello, reflection sync!!
     addCompilerPlugin("org.scalamacros" % "paradise" % "2.1.0" cross CrossVersion.full),
   )
+

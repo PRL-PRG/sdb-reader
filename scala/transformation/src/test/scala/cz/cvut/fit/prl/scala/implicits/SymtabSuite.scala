@@ -2,8 +2,6 @@ package cz.cvut.fit.prl.scala.implicits
 
 import org.scalatest.Matchers
 
-import scala.meta.semanticdb.SemanticdbSuite
-
 class SymtabSuite extends SemanticdbSuite with Matchers {
 
   test("symbol resolution") {

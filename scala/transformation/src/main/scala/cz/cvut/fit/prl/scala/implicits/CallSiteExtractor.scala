@@ -11,6 +11,7 @@ import scala.meta.internal.symtab._
 import cz.cvut.fit.prl.scala.implicits.utils._
 
 import scala.collection.mutable.ArrayBuffer
+import scala.tools.jline_embedded.console.completer.ArgumentCompleter.ArgumentList
 
 trait SymbolResolver {
   def resolveSymbol(range: s.Range): s.SymbolInformation
@@ -66,7 +67,7 @@ object Declaration {
       case _ => Seq()
     }
 
-    Declaration(x.kind, x.symbol, x.name, (x.properties & IMPLICIT.value) > 0, parameterLists)
+    Declaration(x.kind, x.symbol, x.displayName, (x.properties & IMPLICIT.value) > 0, parameterLists)
   }
 }
 
@@ -83,32 +84,61 @@ object ParameterList {
   }
 }
 
-sealed trait Type
+sealed trait Type {
+  def code: String
+}
 
-case object Empty extends Type
+case object Empty extends Type {
+  val code: String = "EMPTY"
+}
 
-case class TypeRef(symbol: s.SymbolInformation) extends Type
+case class TypeRef(symbol: s.SymbolInformation) extends Type {
+  val code: String = symbol.displayName
+}
 
-case class ParamTypeRef(ref: Type, args: Seq[Type]) extends Type
+case class ParamTypeRef(ref: Type, args: Seq[Type]) extends Type {
+  val code: String = s"$ref${args.map(_.code).mkStringOpt("[", ",", "]")}"
+}
 
 sealed trait Argument {
   def argumentType: Type
+
+  def code: String
 }
 
 case class CallSiteRef(callSite: CallSite) extends Argument {
+  val code: String = callSite.code
+
   override def argumentType: Type = callSite.declaration.returnType
 }
 
 case class ValueRef(symbol: s.SymbolInformation) extends Argument {
+  val code: String = symbol.displayName
+
   override def argumentType: Type = ???
 }
 
 case class Literal(value: Any) extends Argument {
+  val code: String = value.toString
+
   override def argumentType: Type = ???
 }
 
 case class Tuple(args: List[Argument]) extends Argument {
+  val code: String = args.map(_.code).mkString("(", ",", ")")
+
   override def argumentType: Type = ???
+}
+
+case class CodeRef(range: s.Range) extends Argument {
+  override def argumentType: Type = ???
+
+  val code: String = s"code<${range.toString}>"
+}
+
+case class Placeholder() extends Argument {
+  override def argumentType: Type = ???
+  val code: String = "_"
 }
 
 case class ArgumentsList(args: Seq[Argument], syntactic: Boolean)
@@ -116,10 +146,15 @@ case class ArgumentsList(args: Seq[Argument], syntactic: Boolean)
 sealed trait CallSite {
   def declaration: Declaration
 
+  def code: String
+
   def argss: Seq[ArgumentsList]
 
   def typeArgs: Seq[Type]
 
+  // FIXME: a method to check class invariant rules
+
+  // FIXME: check the last parameterList in the declaration and if it is implcit return the last the argument list
   def implicitArgs: Option[ArgumentsList] =
     declaration
       .parameterLists
@@ -159,14 +194,26 @@ case class SyntheticCall(
                           argss: Seq[ArgumentsList] = Seq(),
                           typeArgs: Seq[Type] = Seq()
                         ) extends CallSite {
-  override def toString: String = s"SyntheticCall(${declaration.name}, ${range})"
+  val code: String = {
+    val argsStr = argss.map(_.args.map(_.code.mkString("(", ",", ")"))).mkString("")
+    s"${declaration.name}${typeArgs.mkStringOpt("[", ",", "]")}$argsStr"
+  }
+
+  override def toString: String = s"SyntheticCall(${declaration.name}, ${range}, $code)"
 }
 
 case class ConversionCall(
                            declaration: Declaration,
+                           range: s.Range,
                            argss: Seq[ArgumentsList] = Seq(),
                            typeArgs: Seq[Type] = Seq()
                          ) extends CallSite {
+
+  val code: String = {
+    val argsStr = argss.map(_.args.map(_.code.mkString("(", ",", ")"))).mkString("")
+    s"${declaration.name}${typeArgs.mkStringOpt("[", ",", "]")}$argsStr"
+  }
+
   override def toString: String = s"ConversionCall(${declaration.name})"
 }
 
@@ -242,126 +289,167 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
         case Lit(value) =>
           Literal(value)
 
+        case _:Term.Placeholder =>
+          Placeholder()
+
         case _ =>
-          throw new Exception(s"Unsupported argument term: ${arg.structure}")
+          throw new Exception(s"Unsupported argument term: ${arg.structure} (${arg.toString}) at ${arg.pos.toRange}")
       }
     }
 
-    // ++ is too much - too many call sites potentially - should be Nil in args = process(Nil)
+    // TODO: ++ is too much - too many call sites potentially - should be Nil in args = process(Nil)
     def process(css: List[Try[NormalCall]])(tree: Tree): List[Try[NormalCall]] =
       tree match {
         case Term.Apply(fun, args) => {
-          val argsCss = args flatMap process(css)
-          val arguments = args map createArgument(argsCss collect { case Success(x: NormalCall) => x })
-          val argumentList = ArgumentsList(arguments, true)
+          Try {
+            val argsCss = args flatMap process(css)
+            val arguments = args map createArgument(argsCss collect { case Success(x: NormalCall) => x })
+            val argumentList = ArgumentsList(arguments, true)
 
-          fun match {
-            case x: Term.Name =>
-              val funSymbol = resolver.resolveSymbol(x.pos)
-              val declaration = resolveDeclaration(funSymbol)
-              val cs = NormalCall(declaration, tree, fun.pos, argss = Seq(argumentList))
+            fun match {
+              case x: Term.Name =>
+                val funSymbol = resolver.resolveSymbol(x.pos)
+                val declaration = resolveDeclaration(funSymbol)
+                val cs = NormalCall(declaration, tree, fun.pos, argss = Seq(argumentList))
 
-              Success(cs) :: (argsCss ++ css)
-            case x =>
-              val Success(y) :: ys = process(css)(x)
-              val cs = y.copy(tree = tree, lhsRange = fun.pos, argss = y.argss :+ argumentList)
+                Success(cs) :: (argsCss ++ css)
+              case x =>
+                val Success(y) :: ys = process(css)(x)
+                val cs = y.copy(tree = tree, lhsRange = fun.pos, argss = y.argss :+ argumentList)
 
-              Success(cs) :: (ys ++ argsCss) //  ++ css
+                Success(cs) :: (ys ++ argsCss) //  ++ css
+            }
+          } match {
+            case Success(x) => x
+            case Failure(x) => Failure(x) :: css
           }
         }
 
         case Term.ApplyType(fun, targs) => {
-          val typeArgs = targs map resolveType
+          Try {
+            val typeArgs = targs map resolveType
 
-          fun match {
-            case x: Term.Name =>
-              val funSymbol = resolver.resolveSymbol(x.pos)
-              val declaration = resolveDeclaration(funSymbol)
-              val cs = NormalCall(declaration, tree, fun.pos, typeArgs = typeArgs)
+            fun match {
+              case x: Term.Name =>
+                val funSymbol = resolver.resolveSymbol(x.pos)
+                val declaration = resolveDeclaration(funSymbol)
+                val cs = NormalCall(declaration, tree, fun.pos, typeArgs = typeArgs)
 
-              Success(cs) :: css
-            case x =>
-              val Success(y) :: ys = process(css)(x)
-              val cs = y.copy(tree = tree, lhsRange = fun.pos, typeArgs = typeArgs)
+                Success(cs) :: css
+              case x =>
+                val Success(y) :: ys = process(css)(x)
+                val cs = y.copy(tree = tree, lhsRange = fun.pos, typeArgs = typeArgs)
 
-              Success(cs) :: ys //(ys ++ css)
+                Success(cs) :: ys //(ys ++ css)
+            }
+          } match {
+            case Success(x) => x
+            case Failure(x) => Failure(x) :: css
           }
         }
 
         case Term.Select(qual, name) => {
-          val funSymbol = resolver.resolveSymbol(name.pos)
-          val declaration = resolveDeclaration(funSymbol)
-          val cs = NormalCall(declaration, tree, qual.pos)
+          Try {
+            val funSymbol = resolver.resolveSymbol(name.pos)
+            val declaration = resolveDeclaration(funSymbol)
+            val cs = NormalCall(declaration, tree, qual.pos)
 
-          Success(cs) :: process(css)(qual)
+            Success(cs) :: process(css)(qual)
+          } match {
+            case Success(x) => x
+            case Failure(x) => Failure(x) :: css
+          }
         }
 
         case Term.ApplyInfix(lhs, op: Term.Name, targs, args) => {
-          val lhsCss = process(css)(lhs)
-          val argsCss = args flatMap process(css)
-          val arguments = args map createArgument(argsCss collect { case Success(x: NormalCall) => x })
-          val argumentList = ArgumentsList(arguments, true)
-          val r = {
-            val lr = lhs.pos.toRange
-            val or = op.pos.toRange
-            s.Range(lr.startLine, lr.startCharacter, or.endLine, or.endCharacter)
-          }
-          val funSymbol = resolver.resolveSymbol(op.pos)
-          val declaration = resolveDeclaration(funSymbol)
-          val typeArgs = targs map resolveType
-          val cs = NormalCall(declaration, tree, r, Seq(argumentList), typeArgs)
+          Try {
 
-          Success(cs) :: (lhsCss ++ argsCss ++ css)
+            val lhsCss = process(css)(lhs)
+            val argsCss = args flatMap process(css)
+            val arguments = args map createArgument(argsCss collect { case Success(x: NormalCall) => x })
+            val argumentList = ArgumentsList(arguments, true)
+            val r = {
+              val lr = lhs.pos.toRange
+              val or = op.pos.toRange
+              s.Range(lr.startLine, lr.startCharacter, or.endLine, or.endCharacter)
+            }
+            val funSymbol = resolver.resolveSymbol(op.pos)
+            val declaration = resolveDeclaration(funSymbol)
+            val typeArgs = targs map resolveType
+            val cs = NormalCall(declaration, tree, r, Seq(argumentList), typeArgs)
+
+            Success(cs) :: (lhsCss ++ argsCss ++ css)
+          } match {
+            case Success(x) => x
+            case Failure(x) => Failure(x) :: css
+          }
         }
 
         case Term.ApplyUnary(op, arg) => {
-          val argCss = process(css)(arg)
-          val argument = createArgument(argCss collect { case Success(x: NormalCall) => x })(arg)
-          val argumentList = ArgumentsList(Seq(argument), true)
-          val funSymbol = resolver.resolveSymbol(op.pos)
-          val declaration = resolveDeclaration(funSymbol)
-          val cs = NormalCall(declaration, tree, op.pos, Seq(argumentList))
+          Try {
+            val argCss = process(css)(arg)
+            val argument = createArgument(argCss collect { case Success(x: NormalCall) => x })(arg)
+            val argumentList = ArgumentsList(Seq(argument), true)
+            val funSymbol = resolver.resolveSymbol(op.pos)
+            val declaration = resolveDeclaration(funSymbol)
+            val cs = NormalCall(declaration, tree, op.pos, Seq(argumentList))
 
-          Success(cs) :: (argCss ++ css)
+            Success(cs) :: (argCss ++ css)
+          } match {
+            case Success(x) => x
+            case Failure(x) => Failure(x) :: css
+          }
         }
 
         case Term.Interpolate(prefix, _, args) => {
-          val argsCss = args flatMap process(css)
-          val arguments = args map createArgument(argsCss collect { case Success(x: NormalCall) => x })
-          val argumentsList = ArgumentsList(arguments, true)
-          val funSymbol = resolver.resolveSymbol(prefix.pos)
-          val declaration = resolveDeclaration(funSymbol)
-          val r = {
-            val tmp = prefix.pos.toRange
-            tmp.copy(endLine = tmp.startLine, endCharacter = tmp.startCharacter)
-          }
-          val cs = NormalCall(declaration, tree, r, argss = Seq(argumentsList))
+          Try {
+            val argsCss = args flatMap process(css)
+            val arguments = args map createArgument(argsCss collect { case Success(x: NormalCall) => x })
+            val argumentsList = ArgumentsList(arguments, true)
+            val funSymbol = resolver.resolveSymbol(prefix.pos)
+            val declaration = resolveDeclaration(funSymbol)
+            val r = {
+              val tmp = prefix.pos.toRange
+              tmp.copy(endLine = tmp.startLine, endCharacter = tmp.startCharacter)
+            }
+            val cs = NormalCall(declaration, tree, r, argss = Seq(argumentsList))
 
-          Success(cs) :: (argsCss ++ css)
+            Success(cs) :: (argsCss ++ css)
+          } match {
+            case Success(x) => x
+            case Failure(x) => Failure(x) :: css
+          }
         }
 
         case Term.New(Init(tpe, name, argss)) => {
-          val argsCss = argss.flatMap(_.flatMap(process(css)))
-          val argumentss = argss map (args => args map createArgument(argsCss collect { case Success(x: NormalCall) => x }))
-          val argumentsLists = argumentss map (ArgumentsList(_, true))
+          Try {
+            val argsCss = argss.flatMap(_.flatMap(process(css)))
+            val argumentss = argss map (args => args map createArgument(argsCss collect { case Success(x: NormalCall) => x }))
+            val argumentsLists = argumentss map (ArgumentsList(_, true))
 
-          // TODO: check lhsRange
-          // TODO: return type
+            // TODO: check lhsRange
+            // TODO: return type
 
-          val funSymbol = resolver.resolveSymbol(name.pos)
-          val declaration = resolveDeclaration(funSymbol)
-          val typeArgs = resolveType(tpe) match {
-            case ParamTypeRef(_, args) => args
-            case _ => Seq()
+            val funSymbol = resolver.resolveSymbol(name.pos)
+            val declaration = resolveDeclaration(funSymbol)
+            val typeArgs = resolveType(tpe) match {
+              case ParamTypeRef(_, args) => args
+              case _ => Seq()
+            }
+
+            val cs = NormalCall(declaration, tree, name.pos, argumentsLists, typeArgs)
+
+            Success(cs) :: (argsCss ++ css)
+          } match {
+            case Success(x) => x
+            case Failure(x) => Failure(x) :: css
           }
-
-          val cs = NormalCall(declaration, tree, name.pos, argumentsLists, typeArgs)
-
-          Success(cs) :: (argsCss ++ css)
         }
 
         // TODO New.Anonymous
 
+        case Pkg(_, stats) =>
+          stats.flatMap(process(css))
         case Ctor.Primary(_, _, paramss) =>
           paramss.flatten.flatMap(process(css))
         case Ctor.Secondary(_, _, paramss, _, stats) =>
@@ -370,10 +458,12 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
           process(css)(default)
         case Term.Param(_, _, _, None) =>
           css
-        case Defn.Object(_, _, templ) =>
-          process(css)(templ)
+        case Defn.Trait(_, _, _, ctor, templ) =>
+          process(css)(ctor) ++ process(css)(templ)
         case Defn.Class(_, _, _, ctor, templ) =>
           process(css)(ctor) ++ process(css)(templ)
+        case Defn.Object(_, _, templ) =>
+          process(css)(templ)
         case Defn.Var(_, _, _, Some(rhs)) =>
           process(css)(rhs)
         case Defn.Var(_, _, _, None) =>
@@ -382,7 +472,7 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
           process(css)(rhs)
         case Defn.Def(_, _, _, paramss, _, body) =>
           paramss.flatten.flatMap(process(css)) ++ process(css)(body)
-        case _@(_: Defn.Type | _: Import | _: Pkg) =>
+        case _@(_: Defn.Type | _: Import) =>
           css
         case t =>
           t.children flatMap process(css)
@@ -394,7 +484,7 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
   // TODO: refactor
   object idTreeMethod {
     def unapply(t: s.IdTree)(implicit resolver: SymbolResolver): Option[s.SymbolInformation] = {
-      val symbol = resolver.resolveSymbol(t.sym)
+      val symbol = resolver.resolveSymbol(t.symbol)
       if (symbol.kind == Kind.METHOD && (symbol.properties & (0x800 | 0x400)) == 0) {
         Some(symbol)
       } else {
@@ -406,7 +496,7 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
   // TODO: refactor
   object idTreeValue {
     def unapply(t: s.IdTree)(implicit resolver: SymbolResolver): Option[s.SymbolInformation] = {
-      val symbol = resolver.resolveSymbol(t.sym)
+      val symbol = resolver.resolveSymbol(t.symbol)
       if (symbol.kind == Kind.METHOD && (symbol.properties & (0x800 | 0x400)) > 0) {
         Some(symbol)
       } else {
@@ -421,6 +511,8 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
         CallSiteRef(x)
       case (None, idTreeValue(symbol)) =>
         ValueRef(symbol)
+      case (None, s.OriginalTree(Some(range))) =>
+        CodeRef(range)
       case (_, s.FunctionTree(params, term)) =>
         Literal(t)
       case _ =>
@@ -456,12 +548,10 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
 
     def process(node: s.Tree): Option[Int] = node match {
       // implicit conversion
-      case s.ApplyTree(fn, Seq(s.OriginalTree(Some(range)))) => {
+      case s.ApplyTree(fn, Seq(from@s.OriginalTree(Some(range)))) => {
         val resolvedFun = resolveName(fn)
         val declaration = resolveDeclaration(resolvedFun)
-        // TODO: missing range
-        // TODO: missing arg
-        val cs = ConversionCall(declaration)
+        val cs = ConversionCall(declaration, range, Seq(ArgumentsList(Seq(createArgument(from, None)), false)))
         callSitesIndex += cs
 
         process(fn)
@@ -476,12 +566,12 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
               case _ => false
             }
             if (idx == -1) {
-              throw new Exception(s"Unable to find call site for $fun")
+              throw new Exception(s"Unable to find call site for ApplyTree $fun in $node")
             }
 
             idx
           case _ =>
-            process(fun).getOrThrow(new Exception(s"Unable to find call site for $node"))
+            process(fun).getOrThrow(new Exception(s"Unable to find call site for ApplyTree $node"))
         }
 
         val argsCss = implicitArgs map process
@@ -505,12 +595,12 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
               case _ => false
             }
             if (idx == -1) {
-              throw new Exception(s"Unable to find call site for $fun")
+              throw new Exception(s"Unable to find call site for TypeApplyTree $fun in $node")
             }
             idx
 
           case _ =>
-            process(fun).getOrThrow(new Exception(s"Unable to find call site for $node"))
+            process(fun).getOrThrow(new Exception(s"Unable to find call site for TypeApplyTree $node"))
         }
 
         val typeArgs = targs map resolveType
@@ -544,12 +634,12 @@ class CallSiteExtractor(val db: s.TextDocument, val symtab: SymbolTable) {
                 case x => x
               }
             if (idx == -1) {
-              throw new Exception(s"Unable to find call site for $qual")
+              throw new Exception(s"Unable to find call site for SelectTree $qual in $node")
             }
             idx
 
           case _ =>
-            process(qual).getOrThrow(new Exception(s"Unable to find call site for $node"))
+            process(qual).getOrThrow(new Exception(s"Unable to find call site for SelectTree $node"))
         }
 
         val cs = callSitesIndex(idx)

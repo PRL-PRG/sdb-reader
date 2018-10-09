@@ -13,7 +13,7 @@ class LegacySyntheticPrinter {
   private val text = new StringBuilder
 
   private def emit(symbol: String): Unit = {
-    emitCode(symbol.desc.name, symbol)
+    emitCode(symbol.desc.value, symbol)
   }
 
   private def emitCode(code: String, sym: String): Unit = {
